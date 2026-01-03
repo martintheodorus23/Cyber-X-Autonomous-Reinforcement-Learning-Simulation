@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Bio-Scarab RL</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #022c22; /* Very dark green background */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            color: #86efac; /* Green-300 */
+        }
+        #ai-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            pointer-events: auto; /* Allow clicking buttons */
+            color: #86efac;
+            width: 280px;
+        }
+        .btn {
+            pointer-events: auto;
+            background: rgba(20, 83, 45, 0.8);
+            border: 1px solid #4d7c0f;
+            color: #fff;
+            padding: 5px 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.8rem;
+        }
+        .btn:hover { background: #4d7c0f; }
+        .btn:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+
+    <!-- UI Overlay (Left) -->
+    <div id="ui-layer" class="flex flex-col gap-2">
+        <h1 class="text-3xl font-bold drop-shadow-md text-lime-400">BIO-SCARAB RL</h1>
+        <div class="bg-black/40 p-4 rounded-lg border border-lime-500/30 backdrop-blur-sm">
+            <p class="text-sm text-lime-200">Organism Status: <span class="text-green-400 font-mono">ALIVE</span></p>
+            <div class="mt-4">
+                <p class="text-xs uppercase tracking-widest text-lime-600">Stamina</p>
+                <div class="w-48 h-3 bg-gray-900 rounded-full mt-1 overflow-hidden border border-lime-900">
+                    <div id="battery-bar" class="h-full bg-lime-500 w-3/4 shadow-[0_0_10px_rgba(132,204,22,0.7)] transition-all duration-300"></div>
+                </div>
+            </div>
+            <div class="mt-2">
+                <p class="text-xs uppercase tracking-widest text-lime-600">Biomass: <span id="score-display" class="text-white font-mono text-lg">0</span></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Panel (Right) -->
+    <div id="ai-panel" class="flex flex-col gap-2">
+        <div class="bg-black/60 p-4 rounded-lg border border-lime-500/50 backdrop-blur-md shadow-lg">
+            <h2 class="text-xl font-bold text-lime-300 mb-2 border-b border-lime-800 pb-1">Neural Network (Q-Learning)</h2>
+            
+            <div class="flex justify-between items-center mb-2">
+                <span class="text-xs uppercase text-gray-400">Mode:</span>
+                <span id="mode-display" class="text-sm font-bold text-cyan-400">AI TRAINING</span>
+            </div>
+
+            <div class="space-y-2 text-xs font-mono text-lime-100">
+                <div class="flex justify-between">
+                    <span>Epsilon (Randomness):</span>
+                    <span id="epsilon-display">100%</span>
+                </div>
+                <div class="w-full h-1 bg-gray-800 rounded overflow-hidden">
+                    <div id="epsilon-bar" class="h-full bg-cyan-500 w-full"></div>
+                </div>
+
+                <div class="flex justify-between mt-2">
+                    <span>Episode Reward:</span>
+                    <span id="reward-display">0</span>
+                </div>
+                <div class="flex justify-between">
+                    <span>Total Episodes:</span>
+                    <span id="episode-display">0</span>
+                </div>
+                 <div class="flex justify-between">
+                    <span>Action:</span>
+                    <span id="action-display" class="text-yellow-300">-</span>
+                </div>
+            </div>
+
+            <div class="mt-4 flex gap-2">
+                <button class="btn rounded flex-1" onclick="toggleAI()">Toggle Control</button>
+                <button class="btn rounded flex-1 bg-red-900/50 border-red-800" onclick="resetBrain()">Reset Brain</button>
+            </div>
+        </div>
+        
+        <div class="bg-black/40 p-3 rounded-lg border border-lime-500/20 text-xs text-gray-400">
+            <p><strong>Sensors:</strong></p>
+            <ul class="list-disc list-inside mt-1">
+                <li><span class="text-red-400">Red Line</span>: Wall Detected</li>
+                <li><span class="text-green-400">Green Line</span>: Clear Path</li>
+                <li><span class="text-yellow-400">Yellow Line</span>: Target Food</li>
+            </ul>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const batteryBar = document.getElementById('battery-bar');
+        const scoreDisplay = document.getElementById('score-display');
+        
+        // AI UI Elements
+        const epsilonDisplay = document.getElementById('epsilon-display');
+        const epsilonBar = document.getElementById('epsilon-bar');
+        const rewardDisplay = document.getElementById('reward-display');
+        const episodeDisplay = document.getElementById('episode-display');
+        const actionDisplay = document.getElementById('action-display');
+        const modeDisplay = document.getElementById('mode-display');
+
+        // Game State
+        let width, height;
+        let mouseX = 0, mouseY = 0;
+        let score = 0;
+        let frameCount = 0;
+        let gameOver = false;
+
+        // Input State
+        const keys = {
+            w: false, a: false, s: false, d: false,
+            ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false
+        };
+
+        // World Objects
+        let obstacles = [];
+        let collectibles = [];
+        const particles = [];
+
+        // ----------------------
+        // RL AGENT CONFIGURATION
+        // ----------------------
+        let aiMode = true;
+        
+        // Q-Learning Hyperparameters
+        let alpha = 0.1;   // Learning Rate
+        let gamma = 0.9;   // Discount Factor
+        let epsilon = 1.0; // Exploration Rate (starts at 100% random)
+        let epsilonDecay = 0.9995; // Decays per frame
+        let minEpsilon = 0.05;
+
+        // State Tracking
+        let qTable = {}; // The Brain: { "state_string": [Q_val_0, Q_val_1, Q_val_2] }
+        let currentEpisode = 0;
+        let currentEpisodeReward = 0;
+        let lastStateStr = "";
+        let lastAction = 0;
+        let prevDistanceToFood = 0;
+
+        // Actions: 0 = Forward, 1 = Left, 2 = Right
+        const ACTIONS = [0, 1, 2];
+
+        // Robot (Scarab) Configuration
+        const robot = {
+            x: 0,
+            y: 0,
+            vx: 0,
+            vy: 0,
+            radius: 20,
+            angle: -Math.PI / 2,
+            angularVelocity: 0,
+            speed: 0.2,
+            turnSpeed: 0.008,
+            friction: 0.94,
+            angularDrag: 0.90,
+            hoverOffset: 0,
+            colorBody: '#14532d',
+            colorShell: '#1e293b',
+            colorDetail: '#a3e635',
+            motorLState: 0,
+            motorRState: 0,
+            // Sensor Data
+            sensors: [-0.5, 0, 0.5], // Angles relative to heading
+            sensorReadings: [0, 0, 0] // Distance to obstacle
+        };
+
+        // Initialization
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            generateWorld(); // Generate the world ONCE at startup
+            resetGame();
+            loop();
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            // Safety: Pull robot back in if screen shrinks
+            if (robot.x < robot.radius) robot.x = robot.radius;
+            if (robot.x > width - robot.radius) robot.x = width - robot.radius;
+            if (robot.y < robot.radius) robot.y = robot.radius;
+            if (robot.y > height - robot.radius) robot.y = height - robot.radius;
+        }
+
+        function resetGame() {
+            robot.x = width / 2;
+            robot.y = height / 2;
+            robot.vx = 0; robot.vy = 0;
+            robot.angle = -Math.PI/2;
+            currentEpisode++;
+            currentEpisodeReward = 0;
+            
+            // Map generation removed from here to keep the world persistent.
+            // generateWorld(); 
+            
+            // Reset distance metric
+            const closest = getClosestCollectible();
+            if(closest) {
+                prevDistanceToFood = Math.hypot(closest.x - robot.x, closest.y - robot.y);
+            }
+        }
+
+        function generateWorld() {
+            obstacles = [];
+            collectibles = [];
+            
+            // Add some random rocks/mossy blocks
+            for (let i = 0; i < 12; i++) {
+                obstacles.push({
+                    x: Math.random() * (width - 100) + 50,
+                    y: Math.random() * (height - 100) + 50,
+                    w: Math.random() * 80 + 40,
+                    h: Math.random() * 80 + 40,
+                    color: '#3f6212'
+                });
+            }
+
+            // Safe Zone Check
+            const safeZone = 150;
+            for(let i = obstacles.length - 1; i >= 0; i--) {
+                const o = obstacles[i];
+                const dx = (o.x + o.w/2) - (width/2);
+                const dy = (o.y + o.h/2) - (height/2);
+                if (Math.sqrt(dx*dx + dy*dy) < safeZone) {
+                    obstacles.splice(i, 1);
+                }
+            }
+
+            // Add collectibles
+            spawnCollectible();
+            spawnCollectible();
+            spawnCollectible();
+        }
+
+        function spawnCollectible() {
+            let safe = false;
+            let c = {};
+            while(!safe) {
+                c = {
+                    x: Math.random() * (width - 50) + 25,
+                    y: Math.random() * (height - 50) + 25,
+                    radius: 8,
+                    pulse: 0
+                };
+                // Check obstacle collision
+                safe = true;
+                for(let o of obstacles) {
+                    if(c.x > o.x - 20 && c.x < o.x + o.w + 20 && 
+                       c.y > o.y - 20 && c.y < o.y + o.h + 20) {
+                        safe = false;
+                    }
+                }
+            }
+            collectibles.push(c);
+        }
+
+        // ----------------------
+        // AI HELPERS
+        // ----------------------
+
+        function getClosestCollectible() {
+            let minDist = Infinity;
+            let closest = null;
+            for(let c of collectibles) {
+                const d = Math.hypot(c.x - robot.x, c.y - robot.y);
+                if(d < minDist) {
+                    minDist = d;
+                    closest = c;
+                }
+            }
+            return closest;
+        }
+
+        // Raycast Sensor Implementation
+        function castRay(angleOffset) {
+            const rayLength = 150;
+            const rayStart = { x: robot.x, y: robot.y };
+            const angle = robot.angle + angleOffset;
+            const rayEnd = {
+                x: robot.x + Math.cos(angle) * rayLength,
+                y: robot.y + Math.sin(angle) * rayLength
+            };
+
+            let closestDist = rayLength;
+
+            // Check walls
+            const walls = [
+                {x: 0, y: 0, w: width, h: 10}, // Top
+                {x: 0, y: height-10, w: width, h: 10}, // Bottom
+                {x: 0, y: 0, w: 10, h: height}, // Left
+                {x: width-10, y: 0, w: 10, h: height} // Right
+            ];
+
+            const allObs = [...obstacles, ...walls];
+
+            for(let obs of allObs) {
+                // Line Intersection with Rectangle sides
+                // Simplified: Check intersection with 4 lines of the rect
+                const lines = [
+                    {p1: {x:obs.x, y:obs.y}, p2: {x:obs.x+obs.w, y:obs.y}},
+                    {p1: {x:obs.x+obs.w, y:obs.y}, p2: {x:obs.x+obs.w, y:obs.y+obs.h}},
+                    {p1: {x:obs.x+obs.w, y:obs.y+obs.h}, p2: {x:obs.x, y:obs.y+obs.h}},
+                    {p1: {x:obs.x, y:obs.y+obs.h}, p2: {x:obs.x, y:obs.y}}
+                ];
+
+                for(let line of lines) {
+                    const intersect = getLineIntersection(rayStart, rayEnd, line.p1, line.p2);
+                    if(intersect) {
+                        const d = Math.hypot(intersect.x - rayStart.x, intersect.y - rayStart.y);
+                        if(d < closestDist) closestDist = d;
+                    }
+                }
+            }
+
+            return closestDist;
+        }
+
+        function getLineIntersection(p1, p2, p3, p4) {
+            const denom = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y);
+            if (denom == 0) return null;
+            const ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / denom;
+            const ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / denom;
+            if (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1) {
+                return {
+                    x: p1.x + ua * (p2.x - p1.x),
+                    y: p1.y + ua * (p2.y - p1.y)
+                };
+            }
+            return null;
+        }
+
+        // RL Functions
+        function getState() {
+            // 1. Angle to closest food
+            const target = getClosestCollectible();
+            let angleIdx = 0; // Default if no food
+            if (target) {
+                const dx = target.x - robot.x;
+                const dy = target.y - robot.y;
+                let angleToFood = Math.atan2(dy, dx) - robot.angle;
+                // Normalize to -PI to PI
+                while (angleToFood <= -Math.PI) angleToFood += Math.PI*2;
+                while (angleToFood > Math.PI) angleToFood -= Math.PI*2;
+                
+                // Discretize angle into 6 sectors
+                // 0: Ahead-Center, 1: Ahead-Left, 2: Ahead-Right, 3: Back-Left, 4: Back-Right, 5: Behind
+                if (Math.abs(angleToFood) < 0.3) angleIdx = 0; 
+                else if (angleToFood < 0 && angleToFood > -1.5) angleIdx = 1;
+                else if (angleToFood > 0 && angleToFood < 1.5) angleIdx = 2;
+                else if (angleToFood <= -1.5 && angleToFood > -2.5) angleIdx = 3;
+                else if (angleToFood >= 1.5 && angleToFood < 2.5) angleIdx = 4;
+                else angleIdx = 5;
+            }
+
+            // 2. Obstacle Sensors (Thresholding)
+            // Left, Front, Right sensors
+            const sL = robot.sensorReadings[0] < 60 ? 1 : 0;
+            const sF = robot.sensorReadings[1] < 60 ? 1 : 0;
+            const sR = robot.sensorReadings[2] < 60 ? 1 : 0;
+
+            // Combine into string key
+            return `${angleIdx},${sL},${sF},${sR}`;
+        }
+
+        function getQ(state) {
+            if (!qTable[state]) {
+                qTable[state] = [0, 0, 0]; // Init zeros for 3 actions
+            }
+            return qTable[state];
+        }
+
+        function chooseAction(state) {
+            // Epsilon Greedy
+            if (Math.random() < epsilon) {
+                return Math.floor(Math.random() * 3);
+            } else {
+                const qs = getQ(state);
+                // Argmax
+                let maxVal = -Infinity;
+                let action = 0;
+                for(let i=0; i<qs.length; i++) {
+                    if(qs[i] > maxVal) {
+                        maxVal = qs[i];
+                        action = i;
+                    }
+                }
+                return action;
+            }
+        }
+
+        function updateQ(state, action, reward, nextState) {
+            const currentQ = getQ(state)[action];
+            const nextQs = getQ(nextState);
+            const maxNextQ = Math.max(...nextQs);
+            
+            // Bellman Equation
+            const newQ = currentQ + alpha * (reward + gamma * maxNextQ - currentQ);
+            qTable[state][action] = newQ;
+        }
+
+        // ----------------------
+        // MAIN LOOP
+        // ----------------------
+
+        function update() {
+            frameCount++;
+
+            // Sensor Updates (Raycasts)
+            // Left (-0.6), Center (0), Right (0.6)
+            robot.sensorReadings[0] = castRay(-0.6);
+            robot.sensorReadings[1] = castRay(0);
+            robot.sensorReadings[2] = castRay(0.6);
+
+            let action = -1; // -1 means no action taken yet
+
+            // --- BRAIN LOGIC ---
+            if (aiMode) {
+                const state = getState();
+                action = chooseAction(state);
+
+                // Decay epsilon
+                if(epsilon > minEpsilon) epsilon *= epsilonDecay;
+
+                lastStateStr = state;
+                lastAction = action;
+            } 
+            // --- MANUAL LOGIC ---
+            else {
+                // Read keyboard for display purposes
+                if (keys.w || keys.ArrowUp) action = 0;
+                else if (keys.a || keys.ArrowLeft) action = 1;
+                else if (keys.d || keys.ArrowRight) action = 2;
+            }
+
+            // Execute Action
+            // Actions: 0 = Forward, 1 = Left, 2 = Right
+            let thrustL = 0, thrustR = 0;
+
+            if (action === 0) { // Forward
+                thrustL = 1; thrustR = 1;
+            } else if (action === 1) { // Left
+                thrustL = -0.2; thrustR = 1;
+            } else if (action === 2) { // Right
+                thrustL = 1; thrustR = -0.2;
+            } else {
+                // Drift/Brake
+                thrustL = 0; thrustR = 0;
+            }
+
+            // Update UI
+            if(frameCount % 10 === 0) {
+                epsilonDisplay.innerText = (epsilon * 100).toFixed(1) + "%";
+                epsilonBar.style.width = (epsilon * 100) + "%";
+                rewardDisplay.innerText = currentEpisodeReward.toFixed(0);
+                episodeDisplay.innerText = currentEpisode;
+                
+                const actNames = ["FORWARD", "LEFT", "RIGHT"];
+                actionDisplay.innerText = action >= 0 ? actNames[action] : "IDLE";
+            }
+
+            // Visual motor smoothing
+            robot.motorLState += (thrustL - robot.motorLState) * 0.15;
+            robot.motorRState += (thrustR - robot.motorRState) * 0.15;
+
+            // Physics (Differential Drive)
+            const totalThrust = (thrustL + thrustR) * robot.speed;
+            const torque = (thrustL - thrustR) * robot.turnSpeed;
+
+            robot.angularVelocity += torque;
+            robot.vx += Math.cos(robot.angle) * totalThrust;
+            robot.vy += Math.sin(robot.angle) * totalThrust;
+
+            robot.vx *= robot.friction;
+            robot.vy *= robot.friction;
+            robot.angularVelocity *= robot.angularDrag;
+
+            robot.angle += robot.angularVelocity;
+            
+            // 1. Calculate tentative next position
+            let nextX = robot.x + robot.vx;
+            let nextY = robot.y + robot.vy;
+
+            // --- COLLISION LOGIC ---
+            let reward = -0.1; // Living cost
+            let hitWall = false;
+            let hitObstacle = false;
+
+            // 2. Wall Enforcement (Hard Clamp)
+            if (nextX < robot.radius) { 
+                nextX = robot.radius; 
+                hitWall = true; 
+            } else if (nextX > width - robot.radius) { 
+                nextX = width - robot.radius; 
+                hitWall = true; 
+            }
+
+            if (nextY < robot.radius) { 
+                nextY = robot.radius; 
+                hitWall = true; 
+            } else if (nextY > height - robot.radius) { 
+                nextY = height - robot.radius; 
+                hitWall = true; 
+            }
+
+            // 3. Obstacle Collision
+            for (const obs of obstacles) {
+                let testX = nextX;
+                let testY = nextY;
+                if (nextX < obs.x) testX = obs.x;
+                else if (nextX > obs.x + obs.w) testX = obs.x + obs.w;
+                if (nextY < obs.y) testY = obs.y;
+                else if (nextY > obs.y + obs.h) testY = obs.y + obs.h;
+                const dist = Math.hypot(nextX - testX, nextY - testY);
+                if (dist <= robot.radius) {
+                    hitObstacle = true;
+                    break;
+                }
+            }
+
+            // 4. Reward Shaping (Distance)
+            const closest = getClosestCollectible();
+            let currentDist = 0;
+            if(closest && !hitWall && !hitObstacle) {
+                currentDist = Math.hypot(closest.x - nextX, closest.y - nextY);
+                const diff = prevDistanceToFood - currentDist;
+                if(diff > 0) reward += 1;
+                else reward -= 1.5;
+                prevDistanceToFood = currentDist;
+            }
+
+            // 5. Apply Physics Resolution
+            if (hitWall) {
+                reward -= 50;
+                robot.vx *= -0.5; // Bounce off wall
+                robot.vy *= -0.5;
+                // nextX/nextY are already clamped, so we use them
+            }
+
+            if (hitObstacle) {
+                reward -= 100;
+                robot.vx *= -0.5;
+                robot.vy *= -0.5;
+                // Revert to previous safe spot so we don't stick inside obstacle
+                nextX = robot.x;
+                nextY = robot.y;
+            }
+
+            // Update Position
+            robot.x = nextX;
+            robot.y = nextY;
+
+            // 6. Reset Check REMOVED - The robot now learns continuously without respawning
+            /*
+            if (aiMode && (hitWall || hitObstacle)) {
+                currentEpisodeReward += reward;
+                const nextState = getState();
+                updateQ(lastStateStr, lastAction, reward, nextState);
+                resetGame();
+                return;
+            }
+            */
+
+            robot.hoverOffset = Math.sin(frameCount * 0.05) * 2;
+
+            // Collectibles Logic
+            for (let i = collectibles.length - 1; i >= 0; i--) {
+                const c = collectibles[i];
+                const dist = Math.hypot(c.x - robot.x, c.y - robot.y);
+                c.pulse = Math.sin(frameCount * 0.15) * 3;
+
+                if (dist < robot.radius + c.radius + 15) {
+                    createParticles(c.x, c.y, '#fcd34d');
+                    collectibles.splice(i, 1);
+                    score += 100;
+                    reward += 100;
+                    scoreDisplay.innerText = score;
+                    spawnCollectible();
+                    let batWidth = Math.min(100, 75 + (score/1000)*25); 
+                    batteryBar.style.width = batWidth + '%';
+                }
+            }
+
+            // AI Learn Step (Normal)
+            if (aiMode) {
+                currentEpisodeReward += reward;
+                const nextState = getState();
+                updateQ(lastStateStr, lastAction, reward, nextState);
+            }
+
+            // Particles Logic
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.02;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            // Emitters
+            if (Math.abs(thrustL) > 0.1 || Math.abs(thrustR) > 0.1) {
+                const emitParticle = (localX, localY, power) => {
+                    if (power <= 0 || Math.random() > 0.4) return;
+                    const cos = Math.cos(robot.angle);
+                    const sin = Math.sin(robot.angle);
+                    const wx = robot.x + (localX * cos - localY * sin);
+                    const wy = robot.y + (localX * sin + localY * cos);
+                    const spread = (Math.random() - 0.5) * 2;
+                    const pvx = -Math.cos(robot.angle + spread) * (power * 2);
+                    const pvy = -Math.sin(robot.angle + spread) * (power * 2);
+                    particles.push({
+                        x: wx, y: wy, vx: pvx + robot.vx * 0.2, vy: pvy + robot.vy * 0.2,
+                        life: 0.6, color: 'rgba(163, 230, 53, 0.5)', size: Math.random() * 2 + 1
+                    });
+                };
+                emitParticle(-20, 0, thrustL);
+                emitParticle(20, 0, thrustR);
+            }
+        }
+
+        // Input Listeners
+        window.addEventListener('keydown', e => {
+            if (keys.hasOwnProperty(e.key) || keys.hasOwnProperty(e.code)) keys[e.key] = true;
+        });
+        window.addEventListener('keyup', e => {
+            if (keys.hasOwnProperty(e.key) || keys.hasOwnProperty(e.code)) keys[e.key] = false;
+        });
+        window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+
+        // UI Controls
+        window.toggleAI = function() {
+            aiMode = !aiMode;
+            modeDisplay.innerText = aiMode ? "AI TRAINING" : "MANUAL CONTROL";
+            modeDisplay.className = aiMode ? "text-sm font-bold text-cyan-400" : "text-sm font-bold text-orange-400";
+        }
+
+        window.resetBrain = function() {
+            qTable = {};
+            epsilon = 1.0;
+            currentEpisode = 0;
+            score = 0;
+            resetGame();
+        }
+
+        function createParticles(x, y, color) {
+            for (let i = 0; i < 8; i++) {
+                particles.push({
+                    x: x, y: y, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3,
+                    life: 1.0, color: color, size: Math.random() * 3 + 2
+                });
+            }
+        }
+
+        // Rendering
+        function draw() {
+            // Bg
+            ctx.fillStyle = '#022c22';
+            ctx.fillRect(0, 0, width, height);
+
+            // Grid
+            ctx.strokeStyle = '#064e3b';
+            ctx.lineWidth = 1;
+            const gridSize = 60;
+            ctx.beginPath();
+            for (let x = 0; x <= width; x += gridSize) { ctx.moveTo(x, 0); ctx.lineTo(x, height); }
+            for (let y = 0; y <= height; y += gridSize) { ctx.moveTo(0, y); ctx.lineTo(width, y); }
+            ctx.stroke();
+
+            // Obstacles
+            ctx.shadowColor = '#000';
+            ctx.shadowBlur = 10;
+            for (const obs of obstacles) {
+                ctx.fillStyle = '#14532d';
+                ctx.beginPath(); ctx.roundRect(obs.x, obs.y, obs.w, obs.h, 10); ctx.fill();
+                ctx.fillStyle = '#3f6212';
+                ctx.beginPath(); ctx.roundRect(obs.x + 5, obs.y + 5, obs.w - 10, obs.h - 10, 8); ctx.fill();
+            }
+            ctx.shadowBlur = 0;
+
+            // Collectibles
+            for (const c of collectibles) {
+                ctx.beginPath();
+                ctx.arc(c.x, c.y, c.radius + c.pulse, 0, Math.PI * 2);
+                ctx.fillStyle = '#facc15'; ctx.fill();
+                ctx.shadowColor = '#facc15'; ctx.shadowBlur = 15;
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke(); ctx.shadowBlur = 0;
+            }
+
+            // Particles
+            for (const p of particles) {
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+
+            // Debug Lines (AI Vision)
+            if(aiMode) drawDebug();
+
+            drawScarab();
+        }
+
+        function drawDebug() {
+            const target = getClosestCollectible();
+            if(target) {
+                // Line to Food
+                ctx.beginPath();
+                ctx.moveTo(robot.x, robot.y);
+                ctx.lineTo(target.x, target.y);
+                ctx.strokeStyle = 'rgba(250, 204, 21, 0.3)'; // Yellow
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Sensors
+            const sensorAngles = [-0.6, 0, 0.6];
+            for(let i=0; i<3; i++) {
+                const angle = robot.angle + sensorAngles[i];
+                const reading = robot.sensorReadings[i];
+                const maxLen = 150;
+                
+                ctx.beginPath();
+                ctx.moveTo(robot.x, robot.y);
+                const endX = robot.x + Math.cos(angle) * reading;
+                const endY = robot.y + Math.sin(angle) * reading;
+                ctx.lineTo(endX, endY);
+                
+                // Color based on hit
+                if(reading < maxLen - 1) ctx.strokeStyle = 'rgba(248, 113, 113, 0.6)'; // Red (Blocked)
+                else ctx.strokeStyle = 'rgba(74, 222, 128, 0.3)'; // Green (Clear)
+                
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                
+                // Dot at end
+                ctx.beginPath();
+                ctx.arc(endX, endY, 2, 0, Math.PI*2);
+                ctx.fillStyle = ctx.strokeStyle;
+                ctx.fill();
+            }
+        }
+
+        function drawScarab() {
+            ctx.save();
+            ctx.translate(robot.x, robot.y);
+            
+            // Shadow (Soft blob)
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.beginPath(); 
+            ctx.ellipse(0, 30, 25, 12, 0, 0, Math.PI * 2); 
+            ctx.fill();
+
+            // Hover
+            ctx.translate(0, robot.hoverOffset);
+            
+            // Rotate body
+            ctx.rotate(robot.angle + Math.PI/2); 
+
+            // --- X-SHAPED AMOEBA GENERATION ---
+            // We build the shape point-by-point using polar coordinates
+            // r = base + arm_length * sin(2*theta)^2  <-- Creates 4 lobes (X shape)
+            
+            const time = frameCount * 0.15;
+            const points = [];
+            const numPoints = 60;
+            
+            ctx.beginPath();
+            
+            for (let i = 0; i <= numPoints; i++) {
+                const theta = (i / numPoints) * Math.PI * 2;
+                
+                // Base X-shape formula
+                // The 'sin(theta * 2 + Math.PI/4)' shifts the lobes to diagonal positions (X shape)
+                // Math.pow(..., 2) makes the lobes narrower
+                let r = 15 + 20 * Math.pow(Math.sin(theta * 2 + Math.PI/4), 2);
+                
+                // Organic Wobble
+                // Add noise based on time and angle
+                // Speed up wobble if moving
+                const speed = Math.abs(robot.vx) + Math.abs(robot.vy);
+                const wobbleSpeed = time + (speed * 2); 
+                
+                r += Math.sin(theta * 5 + wobbleSpeed) * 2;
+                r += Math.cos(theta * 3 - wobbleSpeed) * 2;
+
+                // Motor Distortion
+                // Bulge the sides slightly based on motor output
+                // Left Motor affects ~180 degrees (PI), Right Motor affects ~0 degrees (0)
+                const leftInfluence = Math.max(0, Math.cos(theta - Math.PI)); // 1 at PI
+                const rightInfluence = Math.max(0, Math.cos(theta)); // 1 at 0
+                
+                r += leftInfluence * (robot.motorLState * 5);
+                r += rightInfluence * (robot.motorRState * 5);
+
+                const px = r * Math.cos(theta);
+                const py = r * Math.sin(theta);
+                
+                if (i === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            
+            ctx.closePath();
+            
+            // Membrane Style
+            ctx.fillStyle = 'rgba(132, 204, 22, 0.7)'; // Lime jelly
+            ctx.fill();
+            ctx.strokeStyle = '#ecfccb'; // Light edge
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Inner Cytoplasm (Nucleus)
+            ctx.beginPath();
+            // Nucleus lags behind slightly for fluid feel
+            const nucX = -robot.vx * 3;
+            const nucY = -robot.vy * 3;
+            ctx.arc(nucX, nucY, 10 + Math.sin(time)*1, 0, Math.PI*2);
+            ctx.fillStyle = 'rgba(236, 252, 203, 0.9)'; // Bright nucleus
+            ctx.fill();
+
+            // "Face" inside Nucleus (Oriented to look forward relative to robot)
+            // Since we rotated the context, (0, -1) is forward
+            ctx.fillStyle = '#1e293b'; 
+            ctx.beginPath(); ctx.arc(nucX - 3, nucY - 4, 2, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(nucX + 3, nucY - 4, 2, 0, Math.PI*2); ctx.fill();
+
+            // Organelles (floating bits)
+            ctx.fillStyle = 'rgba(20, 83, 45, 0.5)';
+            ctx.beginPath(); ctx.arc(nucX + 8, nucY + 5, 3, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(nucX - 6, nucY + 8, 2, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(nucX, nucY - 12, 2, 0, Math.PI*2); ctx.fill();
+
+            ctx.restore();
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        init();
+
+    </script>
+</body>
+</html>
